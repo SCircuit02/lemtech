@@ -1,6 +1,99 @@
-# LEM Nodo Meteo · ESP32-S2
+# LEM · firmwares ESP32-S2
 
-Firmware: `CODE/V0.1.0.0/lem_meteo_s2_v0_1_0_0/lem_meteo_s2_v0_1_0_0.ino`
+| Versión | Firmware | Uso |
+|---|---|---|
+| 0.2.0.0 | `CODE/V0.2.0.0/lem_tester_nodos_s2_v0_2_0_0/lem_tester_nodos_s2_v0_2_0_0.ino` | Tester de nodos: LemWeather, LemSense y SDI-12 |
+| 0.1.0.0 | `CODE/V0.1.0.0/lem_meteo_s2_v0_1_0_0/lem_meteo_s2_v0_1_0_0.ino` | Nodo meteorológico (solo LemWeather) |
+
+# LEM Tester Nodos · v0.2.0.0
+
+Red WiFi **abierta** `LemTESTER_Nodos_XXXX`. XXXX son los 2 últimos bytes de la MAC base,
+la que muestra esptool. La página de inicio ofrece un perfil por tipo de nodo. Al abrir un
+perfil, el ESP reconfigura sus pines para ese nodo. Los demás pines quedan en alta impedancia.
+
+- **GPIO14** (reguladores del SIM7600) y **GPIO15** (regulador de sensores) quedan **siempre encendidos**.
+- El perfil activo sobrevive a un reset por software o watchdog. Después de un encendido, la página parte en *Inicio*.
+- Si otro teléfono cambia el perfil, la página lo avisa y ofrece "Activar aquí".
+
+Librerías: *Adafruit BME280 Library* y *Adafruit SHT31 Library* (con *Adafruit Unified Sensor* y *Adafruit BusIO*).
+Core: esp32 3.x (verificado con 3.3.12), placa *ESP32S2 Dev Module*.
+
+## Perfil LemWeather
+
+Es el mismo firmware que la v0.1.0.0 (ver más abajo), con estas diferencias:
+
+- El SIM7600 nunca se apaga. Si no responde, el firmware solo cierra y reabre el UART.
+- El registro de 1 minuto solo avanza mientras este perfil está activo.
+  Guarda 1 440 registros (24 h) sin USB CDC y 480 registros (8 h) con USB CDC.
+
+## Perfil LemSense
+
+| Señal | Nombre en el nodo | GPIO |
+|---|---|---:|
+| I2C SDA / SCL (SHT30 0x44/0x45, BME280 0x76/0x77, DS1338 0x68) | P1_5 / P1_3 | 8 / 9 |
+| Entradas analógicas | P0_0, P0_1, P0_4, P0_5, P0_6 ADC_BAT | 1, 2, 5, 6, 7 |
+| Pulsos (voltaje + HIGH/LOW + conteo) | P1_6, P1_7, P2_0, P2_1 | 10, 11, 12, 13 |
+
+- **Sensores.** El firmware detecta SHT30 y BME280 cada 5 s y muestra los valores de los que estén presentes.
+- **Voltaje y N° de ADC.** El ADC se lee a 12 dB y se promedian 16 muestras. El voltaje usa la calibración de fábrica (eFuse).
+  El N° de ADC está en escala 0–2047: es la lectura de 13 bits del S2 dividida por 4.
+- **Límite del ADC.** El ADC del ESP32-S2 no mide sobre ~2,5 V (rango calibrado). Si un pin está más alto,
+  el ADC se satura y el portal muestra "≥ X V". Para el umbral de 3,0 V, un pin cuenta como HIGH si mide
+  ≥ 3,0 V **o** si el ADC está saturado. Para distinguir de verdad 2,6 V de 3,3 V hace falta un divisor resistivo.
+- **ADC2 y WiFi.** GPIO11–13 son ADC2, que el ESP32-S2 comparte con el WiFi. El firmware reintenta cada lectura 20 veces.
+  Si todas fallan, el portal muestra "ADC2 ocupado".
+- **Pulsos y voltaje en el mismo pin.** Los pulsos cuentan flancos de bajada con antirrebote (máx. 250 Hz).
+  Un pin puede contar pulsos y medir voltaje a la vez porque el canal ADC se configura una sola vez, antes de activar la entrada digital.
+  Las lecturas posteriores no tocan el pin (verificado en el código del ESP-IDF 5.5).
+- **Pull-up.** Por defecto no hay pull-up interno: se mide el nodo tal cual. Para activarlo, usar `SENSE_PULLUP 1`.
+- **DS1338.** El portal lee la fecha cada 2 s y muestra los bits CH (reloj detenido) y OSF (el oscilador se detuvo).
+  Hay dos botones para escribir la hora:
+  - *Escribir esta fecha*: escribe la fecha que elijas.
+  - *Escribir hora del teléfono*: escribe la hora local del teléfono.
+
+  Al escribir, el firmware pone formato 24 h, arranca el oscilador (CH=0), limpia OSF y verifica la escritura leyendo de vuelta.
+
+## Perfil SDI-12
+
+Hace lo mismo que la pestaña SDI-12 del LemPDA:
+
+- **Buscar sensores.** Sondea las 62 direcciones con `a!` (unos 10 s) y luego lee `aI!` de cada sensor encontrado.
+  El portal muestra la versión SDI-12, el fabricante, el modelo, la versión del sensor y la serie.
+- **Medir.**
+  - Se elige `aC!` o `aM!` y el índice 1–9 (`aC1!`…`aM9!`).
+  - Si el sensor no responde a `aC!`, el firmware usa `aM!`.
+  - Espera `ttt` segundos, como máximo 120 s. Con `aM!` se adelanta si llega el *service request*.
+  - Luego lee `aD0!`…`aD9!` hasta completar los `n` valores.
+  - Los valores se muestran con el texto exacto que mandó el sensor, sin pasar por `float`.
+- **Cambiar ID.** El nuevo ID se elige entre los libres. El cambio se hace con `aAb!` y se verifica: la dirección nueva debe responder.
+- **Comando manual y monitor.** Se puede enviar cualquier comando terminado en `!`. El monitor del bus muestra las últimas 8 transacciones.
+
+Detalles de la implementación:
+
+- **Pines.** El firmware supone el mismo front-end de 2 pines que el LemPDA: TX → driver inversor y RX ← Schmitt inversor.
+  Usa **TX = GPIO4 y RX = GPIO3**, el mismo UART del SIM7600 en LemWeather. Para otros pines, cambiar `SDI12_TX_PIN` y `SDI12_RX_PIN`.
+  Si el front-end no invierte una línea, usar `SDI12_TX_INV` o `SDI12_RX_INV`.
+- **UART por hardware.** Usa el UART por hardware a 1200 baud 7E1, no bit-bang. El S2 tiene un solo núcleo, y apagar
+  interrupciones ~8 ms por carácter afectaría al WiFi.
+- **Break.** El break de 13 ms se genera invirtiendo la línea TX, igual que `uart_send_break()` del core.
+- **Eco.** El eco del propio comando se descarta antes de la respuesta.
+
+## Verificación
+
+- **Compilación.** Compila sin warnings en 5 configuraciones:
+  - ESP32S2 Dev Module, con y sin PSRAM y con y sin USB CDC.
+  - LOLIN S2 Mini.
+
+  El margen de RAM estática es de 4,8 a 7,8 KB.
+- **Simulador SDI-12 en PC.** Corre la máquina de estados real del firmware contra sensores virtuales.
+  Los sensores virtuales solo responden si el break dura ≥ 12 ms y la marca ≥ 8,33 ms.
+  48 pruebas sin fallas: escaneo, `aI!`, `aC!` con caída a `aM!`, *service request*, `aM3!`, `aD0!`/`aD1!`,
+  cambio de ID, comando manual, entradas inválidas y bus ocupado.
+- **JSON.** 52 respuestas JSON válidas (sistema, LemWeather, LemSense y SDI-12, en varios estados).
+- **Portal.** Renderizado en Chromium a 390 px, en tema claro y oscuro, sin errores de JS.
+- **No verificado en hardware:** front-end SDI-12, DS1338, SHT30, voltajes reales del ADC del S2 y el portal en teléfonos.
+
+# LEM Nodo Meteo · v0.1.0.0
 
 Nodo con SIM7600X (GNSS), BME280, veleta analógica y entrada de pulsos.
 Publica un portal cautivo WiFi con los datos en vivo y guarda un registro
